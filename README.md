@@ -64,7 +64,7 @@ Durante el despliegue en un entorno con políticas IAM estrictas, surgieron bloq
 ### 1. Base de Datos RDS Desplegada
 Instancia PostgreSQL en estado "Available" con su respectivo Endpoint y Security Group (Puerto 5432).
 
-![RDS Endpoint Desplegado](assets/1_rds_endpoint.1.png)
+![RDS Endpoint Desplegado](assets/1_rds_endpoint.1.png assets/1_rds_endpoint.2.png)
 
 ### 2. Inyección Segura de Credenciales
 Uso de Variables de Entorno en AWS Lambda para conectar la lógica backend con la base de datos sin exponer contraseñas en el código fuente.
