@@ -1,128 +1,135 @@
-# ☁️ Serverless Postgres API con Workarounds Zero-Trust
+# AWS Serverless Postgres API — Arquitectura Adaptativa y Troubleshooting IAM
 
-Este repositorio documenta la arquitectura, el despliegue y la resolución de problemas (troubleshooting) de una API Serverless gestionada en AWS. El proyecto integra **AWS Lambda (Python 3.11)** y **Amazon RDS (PostgreSQL)** para crear un backend robusto.
+[![AWS Serverless](https://img.shields.io/badge/AWS-Lambda%20%2B%20RDS-orange?logo=amazon-aws)](https://aws.amazon.com/)
+[![Python 3.11](https://img.shields.io/badge/Python-3.11-blue?logo=python)](https://www.python.org/)
+[![PostgreSQL](https://img.shields.io/badge/Amazon%20RDS-PostgreSQL-336791?logo=postgresql&logoColor=white)](https://aws.amazon.com/rds/postgresql/)
+[![Bash](https://img.shields.io/badge/Automation-Bash%20User%20Data-4EAA25?logo=gnu-bash&logoColor=white)](scripts/ec2_user_data.sh)
 
-Más allá de ser un despliegue estándar, este proyecto demuestra habilidades avanzadas de ingeniería en la nube al sortear políticas de seguridad restrictivas (IAM Zero-Trust) y problemas de dependencias en tiempo de ejecución.
-
----
-
-## 🏗️ Arquitectura y Flujo de Datos
-
-A continuación se detalla la arquitectura implementada, incluyendo el flujo efímero utilizado para sortear los bloqueos de empaquetado:
-
-```mermaid
-graph LR
-    User((🌐 Cliente / Navegador))
-    
-    subgraph AWS_Cloud ["AWS Cloud"]
-        
-        subgraph CI_CD ["Workaround CI/CD (Efímero)"]
-            EC2["💻 EC2 Instance<br>Amazon Linux"] -.->|"1. Empaqueta psycopg2 (Py 3.11)<br>2. AWS CLI update-code"| Lambda
-        end
-        
-        Lambda["⚡ AWS Lambda<br>Capa de Cómputo"]
-        
-        subgraph VPC ["Amazon VPC (Red)"]
-            SG["🛡️ Security Group<br>Inbound: TCP 5432"]
-            RDS[("🐘 Amazon RDS<br>PostgreSQL")]
-        end
-        
-    end
-
-    User -- "HTTPS<br>(Lambda Function URL)" --> Lambda
-    Lambda -- "Petición SQL<br>(Variables de Entorno)" --> SG
-    SG --> RDS
-
-    style EC2 stroke-dasharray: 5 5
-```
-
-### 🛠️ Tecnologías Utilizadas
-*   **Capa de Cómputo:** `AWS Lambda` (Python 3.11).
-*   **Capa de Datos:** `Amazon RDS` (PostgreSQL, Single-AZ, `db.t3.micro`).
-*   **Orquestación CI/CD:** `Amazon EC2` (Temporal) & `AWS CLI`.
-*   **Red y Seguridad:** `VPC Security Groups`, `Lambda Environment Variables` (manejo de secretos).
-*   **Exposición Web:** `AWS Lambda Function URLs` (HTTPS nativo).
+> Despliegue y troubleshooting real de una API serverless en AWS (**Lambda Python 3.11** + **Amazon RDS PostgreSQL**) dentro de un entorno con políticas IAM acotadas, utilizando alternativas nativas autorizadas (**Lambda Function URL** y empaquetado efímero en **EC2**).
 
 ---
 
-## 🚧 Retos de Arquitectura y Soluciones (Troubleshooting)
+## Contexto y Problema
 
-Durante el despliegue en un entorno con políticas IAM estrictas, surgieron bloqueos que impidieron el flujo tradicional.
+Al desplegar un backend serverless conectado a **Amazon RDS (PostgreSQL)** en un entorno sandbox con políticas IAM estrictas, el flujo estándar encontró tres bloqueos operativos:
+- Denegación de permisos para crear APIs en **Amazon API Gateway** (`apigateway:POST` denied).
+- Bloqueo de **AWS CloudShell** y de **Lambda Layers** externas.
+- Error `Runtime.ImportModuleError` en ejecución por incompatibilidad de binarios compilados de `psycopg2` (generados para Python 3.9 en lugar de Python 3.11).
 
-### 1. Bloqueo de Dependencias y `Runtime.ImportModuleError`
-*   **El Problema:** El entorno bloqueó la descarga de Lambda Layers públicas y el acceso a CloudShell. Además, el OS de compilación generaba binarios de `psycopg2` para Python 3.9, lo que provocaba un error crítico (`Runtime.ImportModuleError`) al ejecutarse en la Lambda configurada con Python 3.11.
-*   **La Solución:** Se diseñó un flujo de CI/CD efímero. Se aprovisionó una instancia EC2 temporal con el script de [User Data Bash](scripts/ec2_user_data.sh). Este script instaló explícitamente Python 3.11, descargó la librería correcta (`psycopg2-binary`), comprimió el código de la [función Lambda](src/lambda_function.py) en un Deployment Package y forzó la actualización de la Lambda mediante AWS CLI. Tras el éxito, la instancia fue destruida.
-
-### 2. Bloqueo de Amazon API Gateway
-*   **El Problema:** Denegación de permisos (`apigateway:POST` denied) al intentar crear la API pública.
-*   **La Solución:** Se pivotó la arquitectura hacia **AWS Lambda Function URLs**, logrando exponer el backend a internet mediante un endpoint HTTPS nativo, sin depender del servicio bloqueado y reduciendo la latencia de red.
+Este repositorio documenta la arquitectura resultante, los scripts de automatización y la evidencia real de diagnóstico y resolución.
 
 ---
 
-## 📸 Evidencia de Configuración y Despliegue (Principal)
+## Arquitectura del Sistema
 
-### 1. Base de Datos RDS Desplegada
-Instancia PostgreSQL en estado "Available" con su respectivo Endpoint y Security Group (Puerto 5432).
+Flujo completo de exposición HTTPS, consulta a RDS dentro de VPC y build efímero en EC2 (`us-west-2`):
 
+![Arquitectura Serverless Lambda y Amazon RDS PostgreSQL](docs/architecture.svg)
+
+---
+
+## Decisiones Técnicas y Troubleshooting
+
+1. **Lambda Function URL en lugar de API Gateway:** ante la restricción de permisos en API Gateway, se expuso `fetch-postgres-data` mediante una **Lambda Function URL** nativa HTTPS, evitando componentes intermedios y reduciendo latencia y costo por solicitud.
+2. **Empaquetado efímero en EC2 Amazon Linux (`scripts/ec2_user_data.sh`):** para resolver `Runtime.ImportModuleError` sin CloudShell ni Layers externas, se levantó una instancia EC2 temporal con un script de User Data que instala `python3.11`, empaqueta `psycopg2-binary` junto a [src/lambda_function.py](src/lambda_function.py) en un ZIP compatible con el runtime de Lambda y ejecuta `aws lambda update-function-code`. Finalizado el despliegue, la instancia se destruyó.
+3. **Cierre explícito de conexiones SQL:** la función cierra cursor y conexión (`cur.close()`, `conn.close()`) en cada invocación para evitar fugas de conexiones hacia `db.t3.micro`.
+
+---
+
+## Seguridad e IAM
+
+Controles aplicados en el despliegue actual:
+- **Sin credenciales en el código fuente:** `DB_HOST`, `DB_NAME`, `DB_USER` y `DB_PASS` se inyectan mediante variables de entorno de AWS Lambda.
+- **Control perimetral de red:** el **Security Group** de Amazon RDS expone únicamente el puerto `TCP 5432` para tráfico PostgreSQL.
+- **Superficie de ataque efímera:** la instancia EC2 usada como builder se elimina inmediatamente tras actualizar el paquete de Lambda.
+
+**Hardening previsto para producción:**
+- Migrar credenciales de variables de entorno a **AWS Secrets Manager** con rotación automática.
+- Ubicar tanto Lambda como RDS en **subredes privadas** con reglas Security Group a Security Group, e incorporar **Amazon RDS Proxy** para manejar pooling de conexiones bajo concurrencia alta.
+- Cambiar la autenticación de la Function URL de `NONE` a `AWS_IAM` (o exponer detrás de API Gateway + Cognito) y restringir `Access-Control-Allow-Origin: '*'` al dominio del cliente.
+
+---
+
+## FinOps y Control de Costos
+
+- **AWS Lambda + Function URL:** dentro del AWS Free Tier (1M solicitudes/mes) y sin costo adicional por request de API Gateway.
+- **EC2 Builder efímera:** ejecutada pocos minutos solo durante el empaquetado y terminada al completar el despliegue (costo marginal ~$0.00).
+- **Amazon RDS (`db.t3.micro`, Single-AZ):** cubierta por las 750 horas/mes del Free Tier de RDS durante el primer año; en entornos de laboratorio se recomienda detener o eliminar la instancia al finalizar las pruebas para evitar cargos residuales.
+
+---
+
+## Evidencia de Despliegue y Troubleshooting
+
+### 1. Base de datos RDS desplegada (Endpoint y Security Group TCP 5432)
 ![RDS Endpoint Desplegado](assets/1_rds_endpoint.1.png)
-![RDS Endpoint Desplegado](assets/1_rds_endpoint.2.png)
+![RDS Security Group](assets/1_rds_endpoint.2.png)
 
-### 2. Inyección Segura de Credenciales
-Uso de Variables de Entorno en AWS Lambda para conectar la lógica backend con la base de datos sin exponer contraseñas en el código fuente.
-
+### 2. Inyección de credenciales vía Variables de Entorno en Lambda
 ![Variables de Entorno Lambda](assets/2_lambda_env_vars.png)
 
-### 3. Validación Final (Éxito)
-Petición HTTP a la Function URL desde el navegador, retornando la versión exacta del motor PostgreSQL y demostrando conectividad Serverless total.
-
+### 3. Validación final desde Function URL (HTTP 200 + versión PostgreSQL)
 ![Respuesta de éxito del API](assets/3_success_response.png)
 
----
-
-## 📂 Galería de Evidencia Extendida (Proceso y Errores)
-
-Para ver la documentación visual detallada de los errores de IAM y el Troubleshooting, consulta las capturas correspondientes abajo:
+### Galería de errores diagnosticados y resolución
 
 <details>
-<summary><b>❌ Error 1: Denegación de creación en Amazon API Gateway</b></summary>
+<summary><b>Error 1: Denegación de permisos en Amazon API Gateway</b></summary>
 
-Muestra el bloqueo de permisos al intentar crear una REST API de API Gateway (`err_apigateway.png`).
+Bloqueo `apigateway:POST` al intentar crear una REST API (`assets/err_apigateway.png`).
 ![Error API Gateway](assets/err_apigateway.png)
 </details>
 
 <details>
-<summary><b>❌ Error 2: Bloqueo de entorno AWS CloudShell</b></summary>
+<summary><b>Error 2: Bloqueo de AWS CloudShell</b></summary>
 
-Muestra el mensaje de denegación al intentar iniciar CloudShell en la consola de AWS (`err_cloudshell.png`).
+Denegación al iniciar CloudShell en consola (`assets/err_cloudshell.png`).
 ![Error CloudShell](assets/err_cloudshell.png)
 </details>
 
 <details>
-<summary><b>❌ Error 3: Bloqueo de uso de Lambda Layers externas</b></summary>
+<summary><b>Error 3: Bloqueo de Lambda Layers externas</b></summary>
 
-Bloqueo de seguridad al intentar adjuntar una capa ARN pública (`err_lambda_layer.png`).
+Restricción al adjuntar una capa ARN pública (`assets/err_lambda_layer.png`).
 ![Error Lambda Layer](assets/err_lambda_layer.png)
 </details>
 
 <details>
-<summary><b>❌ Error 4: Error de Servidor Interno (Incompatibilidad de psycopg2)</b></summary>
+<summary><b>Error 4: Runtime.ImportModuleError (binarios psycopg2 incompatibles)</b></summary>
 
-Error `Runtime.ImportModuleError` en los logs de CloudWatch debido a incompatibilidad de dependencias compiladas (`err_internal_server.png`).
+Error en CloudWatch Logs por compilar `psycopg2` en Python 3.9 frente a Lambda en Python 3.11 (`assets/err_internal_server.png`).
 ![Error Internal Server](assets/err_internal_server.png)
 </details>
 
 <details>
-<summary><b>✅ Solución: Configuración Exitosa de Lambda Function URL</b></summary>
+<summary><b>Resolución: Configuración de Lambda Function URL</b></summary>
 
-Ajustes de la Function URL con tipo de autorización `NONE` para saltarse las restricciones de API Gateway (`sol_function_url.png`).
+Exposición HTTPS nativa mediante Function URL (`assets/sol_function_url.png`).
 ![Solución Function URL](assets/sol_function_url.png)
 </details>
 
 ---
 
-## 🚀 Lecciones Aprendidas y Habilidades Demostradas
+## Estructura del Repositorio
 
-*   **Resiliencia Arquitectónica:** Capacidad para rediseñar infraestructuras sobre la marcha usando alternativas nativas (Function URLs vs API Gateway).
-*   **Resolución de Problemas Backend:** Diagnóstico profundo de incompatibilidades de ejecución (`Runtime.ImportModuleError`) e igualación de entornos de empaquetado/ejecución con Python y SQL.
-*   **Automatización e Infraestructura:** Uso de Bash Scripting en el User Data para convertir una instancia EC2 en un servidor de despliegue automatizado.
-*   **Seguridad en la Nube:** Aplicación de principios de seguridad gestionando el tráfico con Security Groups y resguardando credenciales con Environment Variables.
+```text
+aws-serverless-postgres-api/
+├── assets/                    # Capturas reales de despliegue, errores IAM y validación
+├── docs/
+│   └── architecture.svg       # Diagrama de arquitectura serverless y build efímero
+├── scripts/
+│   └── ec2_user_data.sh       # Script Bash para empaquetar psycopg2 (Py 3.11) y subir a Lambda
+├── src/
+│   └── lambda_function.py     # Handler Lambda con conexión a RDS PostgreSQL
+└── README.md
+```
+
+---
+
+## Autor
+
+**Víctor Martínez** — Junior Cloud Engineer | AWS, FinOps & Applied AI  
+AWS Certified Cloud Practitioner • AWS Cloud re/Start • En preparación para SAA-C03
+
+- **Portafolio:** [vitonez5198.github.io/Portfolio-VM](https://vitonez5198.github.io/Portfolio-VM/)
+- **LinkedIn:** [victor-ms-dev](https://www.linkedin.com/in/victor-ms-dev/)
+- **GitHub:** [@VitoNez5198](https://github.com/VitoNez5198)
