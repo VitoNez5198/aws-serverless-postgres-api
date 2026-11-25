@@ -24,7 +24,14 @@ Este repositorio documenta la arquitectura resultante, los scripts de automatiza
 
 Flujo completo de exposición HTTPS, consulta a RDS dentro de VPC y build efímero en EC2 (`us-west-2`):
 
-![Arquitectura Serverless Lambda y Amazon RDS PostgreSQL](docs/architecture.svg)
+![Arquitectura Serverless Lambda y Amazon RDS PostgreSQL](docs/architecture.png)
+
+### Flujo de Trabajo y Rol de cada Servicio
+
+1. **Empaquetado efímero (`Amazon EC2 Builder`):** Ante restricciones IAM sobre CloudShell y Lambda Layers, se levanta una instancia EC2 temporal con un script Bash en User Data que instala Python 3.11, empaqueta `psycopg2-binary` junto al código de la función y actualiza Lambda vía AWS CLI. Al terminar, la instancia se elimina.
+2. **Exposición HTTPS (`AWS Lambda` + `Function URL`):** El cliente realiza peticiones HTTPS directamente a la Function URL nativa de Lambda (reemplazando a API Gateway debido al bloqueo IAM), sin servidores intermedios.
+3. **Acceso a base de datos (`VPC` + `Security Group` + `Amazon RDS`):** Lambda lee las credenciales desde variables de entorno y se conecta por `TCP 5432` (autorizado en el Security Group) a Amazon RDS PostgreSQL dentro de la VPC para ejecutar la consulta y devolver la respuesta JSON.
+4. **Diagnóstico y logs (`Amazon CloudWatch`):** Cada ejecución registra sus eventos y trazas de error en CloudWatch Logs, lo que permitió diagnosticar el error `Runtime.ImportModuleError` y validar la corrección.
 
 ---
 
@@ -115,7 +122,8 @@ Exposición HTTPS nativa mediante Function URL (`assets/sol_function_url.png`).
 aws-serverless-postgres-api/
 ├── assets/                    # Capturas reales de despliegue, errores IAM y validación
 ├── docs/
-│   └── architecture.svg       # Diagrama de arquitectura serverless y build efímero
+│   ├── architecture.drawio    # Fuente editable del diagrama (Draw.io / AWS4)
+│   └── architecture.png       # Diagrama de arquitectura serverless y build efímero
 ├── scripts/
 │   └── ec2_user_data.sh       # Script Bash para empaquetar psycopg2 (Py 3.11) y subir a Lambda
 ├── src/
